@@ -22,34 +22,17 @@ pip install --upgrade pip  # enable PEP 660 support
 
 2. Install the dependencies
 
-There are several ways to install the package:
-
 ```bash
-# Install from Github
-pip install git+https://github.com/boyugou/llava_uground.git
+pip install -r requirements.txt
 ```
-
-```bash
-# Install locally
-git clone https://github.com/boyugou/llava_uground.git
-pip install -e .
-```
-
-```bash
-# Install from pypi (Not uploaded yet)
-pip install to_be_uploaded
-```
-
-
-
 
 ## Inference
 
-
-
 ```bash
-python single_infer.py # single request
+python single_infer.py <model_selector> <image_path> <image_query>
 
-python batch_infer.py # for inference of a jsonl
+eg:
+python single_infer.py uground ../miza/datasets/test/calculator.png 'plus button'
 ```
+Output of single_infer is stored in the image directory with query as suffix.
 

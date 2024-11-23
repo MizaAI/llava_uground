@@ -9,6 +9,9 @@ from llava.mm_utils import tokenizer_image_token, process_images, pre_resize_by_
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 
+import sys
+
+args = sys.argv[1:]
 
 def draw_circle_on_image(image, coordinates, radius=20, color=(255, 0, 0)):
     x, y = coordinates
@@ -31,11 +34,18 @@ def draw_circle_on_image(image, coordinates, radius=20, color=(255, 0, 0)):
 
 
 disable_torch_init()
-model_path = 'osunlp/UGround'
-tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, None, model_path)
 
-image_path = "gradio_examples/semantic.jpg"
-description = "Home"
+model_arg = args[0]
+image_path = args[1]
+description = args[2]
+# image_path = "gradio_examples/semantic.jpg"
+# description = "Home"
+
+if model_arg == 'uground':
+    model_path = 'osunlp/UGround'
+elif model_arg == 'miza':
+    model_path = '../miza/models/11-18-2024/llava-v1.5-uground-v1-miza-v1-lora-merged'
+tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, None, model_path)
 
 qs = f"In the screenshot, where are the pixel coordinates (x, y) of the element corresponding to \"{description}\"?"
 
@@ -74,5 +84,4 @@ fixed_coordinates = tuple(x / pre_resize_scale for x in output_coordinates)
 print("fixed_outputs:",fixed_coordinates)
 
 image = draw_circle_on_image(image, fixed_coordinates)
-image.show()
-
+image.save(image_path + '-' + description + '-out-' + model_arg + '.png')

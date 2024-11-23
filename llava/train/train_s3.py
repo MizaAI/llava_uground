@@ -20,12 +20,8 @@ import json
 import logging
 import pathlib
 from typing import Dict, Optional, Sequence, List
-import boto3
 import pyarrow.parquet as pq
 import pandas as pd
-import fsspec
-import s3fs
-import io
 import torch
 
 import transformers
@@ -666,97 +662,45 @@ class LazySupervisedDataset(Dataset):
                  data_args: DataArguments,
                  chunk_size: int = 4):
         super(LazySupervisedDataset, self).__init__()
+        list_data_dict = json.load(open(data_path, "r"))
+
+        rank0_print("Formatting inputs...Skip in lazy mode")
         self.data_path = data_path
         self.tokenizer = tokenizer
+        self.list_data_dict = list_data_dict
         self.data_args = data_args
         self.chunk_size = chunk_size
 
-        # Setup S3 filesystem
-        self.s3 = s3fs.S3FileSystem()
-
-        self.f = self.s3.open(self.data_path, 'rb')
-        # self.parquet_file = pq.ParquetFile(self.f, buffer_size=2048)
-        self.parquet_file = pq.ParquetFile(self.f)
-        self.metadata = self.parquet_file.metadata
-
-        # Get total number of rows without loading the entire file
-        # with open(self.data_path, 'rb') as f:
-        self.total_rows = sum(self.metadata.row_group(i).num_rows for i in range(self.metadata.num_row_groups))
-
-        # rank0_print("Formatting inputs...Skip in lazy mode")
-
     def __len__(self):
+        return len(self.list_data_dict)
 
-        # rank0_print(f"Getting Length: {self.total_rows}")
-        return self.total_rows
+    @property
+    def lengths(self):
+        length_list = []
+        for sample in self.list_data_dict:
+            img_tokens = 128 if 'image' in sample else 0
+            length_list.append(sum(len(conv['value'].split()) for conv in sample['conversations']) + img_tokens)
+        return length_list
 
-    def __getitem__(self, idx):
+    @property
+    def modality_lengths(self):
+        length_list = []
+        for sample in self.list_data_dict:
+            cur_len = sum(len(conv['value'].split()) for conv in sample['conversations'])
+            cur_len = cur_len if 'image' in sample else -cur_len
+            length_list.append(cur_len)
+        return length_list
 
-        # rank0_print(f"Getting item at index: {idx}")
-
-        if isinstance(idx, int):
-            try:
-
-                return self._get_single_item(idx)
-            except Exception as e:
-                print(e)
-                self.f = self.s3.open(self.data_path, 'rb')
-                # self.parquet_file = pq.ParquetFile(self.f, buffer_size=2048)
-                self.parquet_file = pq.ParquetFile(self.f)
-                return self._get_single_item(idx)
-
-        elif isinstance(idx, slice):
-            try:
-                return [self._get_single_item(i) for i in range(*idx.indices(len(self)))]
-            except Exception as e:
-                print(e)
-                self.f = self.s3.open(self.data_path, 'rb')
-                # self.parquet_file = pq.ParquetFile(self.f, buffer_size=2048)
-                self.parquet_file = pq.ParquetFile(self.f)
-                return [self._get_single_item(i) for i in range(*idx.indices(len(self)))]
-        else:
-            raise TypeError("Invalid argument type")
-
-    def _get_single_item(self, idx):
-
-        rank0_print(f"Getting single item at index: {idx}")
-        chunk_idx = idx // self.chunk_size
-        row_idx = idx % self.chunk_size
-
-        # with open(self.data_path, 'rb') as f:
-            # num_row_groups = parquet_file.num_row_groups
-            # row_group_size = self.chunk_size
-            # if chunk_idx >= num_row_groups:
-            #     raise IndexError(f"chunk_idx {chunk_idx} out of bounds {num_row_groups}")
-
-            # target_row_group = chunk_idx * self.chunk_size // row_group_size
-        table = self.parquet_file.read_row_group(chunk_idx)
-        chunk = table.to_pandas()
-
-        # if chunk_idx == num_row_groups - 1:
-        #     row_group_size = len(chunk)
-        #     if row_idx >= row_group_size:
-        #         raise IndexError(f"row_idx {row_idx} out of bounds {row_group_size}")
-        # else:
-        #     if row_idx >= self.chunk_size:
-        #         raise IndexError(f"row_idx {row_idx} out of bounds {row_group_size}")
-
-        # start_row = (chunk_idx * self.chunk_size) % row_group_size
-        # end_row = start_row + self.chunk_size
-        # chunk = chunk.iloc[start_row:end_row]
-
-        sample = chunk.iloc[row_idx]
-
-        # Process the sample as before
-        sources = json.loads(sample['conversations'])
-
-        if isinstance(idx, int):
+    def __getitem__(self, i):
+        sources = self.list_data_dict[i]
+        if isinstance(i, int):
             sources = [sources]
-
-        if 'image' in sample:
-            image_bytes = sample['image']
-            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-
+        assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        if 'image' in sources[0]:
+            image_file = self.list_data_dict[i]['image']
+            image_folder = self.data_args.image_folder
+            processor = self.data_args.image_processor
+            image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
             if self.data_args.image_aspect_ratio == 'pad':
                 def expand2square(pil_img, background_color):
                     width, height = pil_img.size
@@ -770,34 +714,32 @@ class LazySupervisedDataset(Dataset):
                         result = Image.new(pil_img.mode, (height, height), background_color)
                         result.paste(pil_img, ((height - width) // 2, 0))
                         return result
-
-                image = expand2square(image, tuple(int(x * 255) for x in self.data_args.image_processor.image_mean))
-                image = self.data_args.image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             elif self.data_args.image_aspect_ratio == 'square':
-                image = self.data_args.image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             elif self.data_args.image_aspect_ratio == 'anyres_ui':
-                image, new_size = process_anyres_ui_image(image, self.data_args.image_processor, fusion=False)
+                image, new_size = process_anyres_ui_image(image, processor, fusion=False)
             elif self.data_args.image_aspect_ratio == 'anyres_ui_fusion':
-                image, new_size = process_anyres_ui_image(image, self.data_args.image_processor, fusion=True)
+                image, new_size = process_anyres_ui_image(image, processor, fusion=True)
             sources = preprocess_multimodal(
-                copy.deepcopy([e for e in sources]),
+                copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
         else:
-            sources = copy.deepcopy([e for e in sources])
-
+            sources = copy.deepcopy([e["conversations"] for e in sources])
         data_dict = preprocess(
             sources,
             self.tokenizer,
-            has_image=('image' in sample))
-        if isinstance(idx, int):
+            has_image=('image' in self.list_data_dict[i]))
+        if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])
 
         # image exist in the data
-        if 'image' in sample:
+        if 'image' in self.list_data_dict[i]:
             data_dict['image'] = image
-            if (
-                    self.data_args.image_aspect_ratio == 'anyres_ui' or self.data_args.image_aspect_ratio == 'anyres_ui_fusion'):
+            if (self.data_args.image_aspect_ratio == 'anyres_ui' or 
+                self.data_args.image_aspect_ratio == 'anyres_ui_fusion'):
                 data_dict['image_size'] = new_size
             else:
                 data_dict['image_size'] = (0, 0)
@@ -807,27 +749,6 @@ class LazySupervisedDataset(Dataset):
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
             data_dict['image_size'] = (crop_size['height'], crop_size['width'])
         return data_dict
-
-    @property
-    def lengths(self):
-
-        rank0_print(f"Getting lengths property function")
-        return LazyList(self._get_length, self.total_rows)
-
-    def _get_length(self, idx):
-        rank0_print(f"Getting __get_length property function {idx}")
-        sample = self._get_single_item(idx)
-        img_tokens = 128 if 'image' in sample else 0
-        return sum(len(conv['value'].split()) for conv in json.loads(sample['conversations'])) + img_tokens
-    @property
-    def modality_lengths(self):
-        rank0_print(f"Getting modality_lengths property function")
-        return LazyList(self._get_modality_length, self.total_rows)
-    def _get_modality_length(self, idx):
-        rank0_print(f"Getting get_modality_length property function {idx}")
-        sample = self._get_single_item(idx)
-        cur_len = sum(len(conv['value'].split()) for conv in json.loads(sample['conversations']))
-        return cur_len if 'image' in sample else -cur_len
 
 
 @dataclass
@@ -866,6 +787,7 @@ class DataCollatorForSupervisedDataset(object):
             # print(f"DEBUG batch['image_sizes'] {batch['image_sizes']}")
 
         return batch
+
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                                 data_args) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
@@ -1025,7 +947,6 @@ def train(attn_implementation=None):
         model.config.image_aspect_ratio = data_args.image_aspect_ratio
         model.config.tokenizer_padding_side = tokenizer.padding_side
         model.config.tokenizer_model_max_length = tokenizer.model_max_length
-        # print("DEBUGG!!!-----\'model.config.tokenizer_model_max_length:\'",model.config.tokenizer_model_max_length)
 
         model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
         if model_args.tune_mm_mlp_adapter:
@@ -1059,71 +980,34 @@ def train(attn_implementation=None):
                 if hasattr(module, 'weight'):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
-    # rank0_print(f"make_supervised_data_module")
 
-    # original_socket_recv = socket.socket.recv
-
-    # def monitoring_socket_recv(sock, bufsize, *args, **kwargs):
-    #     data = original_socket_recv(sock, bufsize, *args, **kwargs)
-    #     if data:
-    #         monitoring_socket_recv.total_downloaded += len(data)
-    #         monitoring_socket_recv.progress_bar.update(len(data))
-    #     return data
-    # import tqdm
-    # monitoring_socket_recv.total_downloaded = 0
-    # monitoring_socket_recv.progress_bar = tqdm(total=0, unit='B', unit_scale=True, desc='Total Downloaded')
-    # # Apply the patch
-    # socket.socket.recv = monitoring_socket_recv
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
-
-    # rank0_print(f"LLaVATrainer")
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)
-    # rank0_print(f"Start Train")
+
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train()
-    try:
-        monitoring_socket_recv.progress_bar.close()
-    except Exception as e:
-        print(e)
-
-
     trainer.save_state()
 
     model.config.use_cache = True
 
-    # print("DEBUG---NAMED_PARAMETERS", model.named_parameters())
-
     if training_args.lora_enable:
-        # print("DEBUG--- ENTER  LORA_ENABLE")
-
-
-        # print("DEBUG---NONE-LORA-STATE-DICT", model.named_parameters())
         state_dict = get_peft_state_maybe_zero_3(
             model.named_parameters(), training_args.lora_bias
         )
-
-        # print("DEBUG---LORA-STATE-DICT",state_dict)
-
-
-        # raise Exception
-
         non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
             model.named_parameters()
         )
-
-        # print("DEBUG---NONE-LORA-STATE-DICT", non_lora_state_dict)
         if training_args.local_rank == 0 or training_args.local_rank == -1:
             model.config.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
             torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
     else:
-        # print("DEBUG--- ENTER  ELSE")
         safe_save_model_for_hf_trainer(trainer=trainer,
                                        output_dir=training_args.output_dir)
 

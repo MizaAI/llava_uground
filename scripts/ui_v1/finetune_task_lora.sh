@@ -3,10 +3,10 @@
 deepspeed llava/train/train_mem.py \
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
     --deepspeed ./scripts/zero3.json \
-    --model_name_or_path llava-v1.5-vicuna-7b-16k-pad-fusion-lora \
+    --model_name_or_path osunlp/UGround \
     --version v1 \
-    --data_path /fs/ess/PAS1576/boyu_gou/new_collect_ui_data/grounding_llava_data/part_1.json \
-    --image_folder /fs/ess/PAS1576/boyu_gou/new_collect_ui_data/grounding_llava_data/ \
+    --data_path ../miza/datasets/google-docs-annotations-11-16-2024/annotations.json \
+    --image_folder ../miza/datasets/google-docs-annotations-11-16-2024/images \
     --vision_tower openai/clip-vit-large-patch14 \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
@@ -15,7 +15,7 @@ deepspeed llava/train/train_mem.py \
     --image_aspect_ratio anyres_ui \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir /your_path/ui_llava_fine_tune/checkpoints/ui-llava-ocr/llava-v1.5-vicuna-7b-16k-pad-fusion-lora \
+    --output_dir ../miza/models/lora-output \
     --num_train_epochs 1 \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 4 \

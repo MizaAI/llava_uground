@@ -29,6 +29,8 @@ import tokenizers
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from torch.utils.data import Dataset
+from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM
+from llava.model.language_model.llava_mpt import LlavaMptForCausalLM
 from llava.train.llava_trainer import LLaVATrainer
 
 from llava import conversation as conversation_lib
@@ -987,6 +989,20 @@ def train(attn_implementation=None):
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)
+    
+    if training_args.lora_enable:
+        state_dict = get_peft_state_maybe_zero_3(
+            model.named_parameters(), training_args.lora_bias
+        )
+        non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
+            model.named_parameters()
+        )
+
+        out_dir = os.path.join(training_args.output_dir, "initial_weights")
+        if training_args.local_rank == 0 or training_args.local_rank == -1:
+            model.config.save_pretrained(out_dir)
+            model.save_pretrained(out_dir, state_dict=state_dict)
+            torch.save(non_lora_state_dict, os.path.join(out_dir, 'non_lora_trainables.bin'))
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
